@@ -8,6 +8,9 @@ import com.Switchboard.InterviewService.model.InterviewExperience;
 import com.Switchboard.InterviewService.repository.InterviewExperienceRepository;
 import com.Switchboard.InterviewService.service.FileService;
 import com.Switchboard.InterviewService.service.InterviewExperienceService;
+import com.Switchboard.InterviewService.service.cache.InterviewCacheService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.modelmapper.ModelMapper;
 import org.slf4j.Logger;
@@ -20,7 +23,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -31,7 +37,8 @@ public class InterviewExperienceServiceImpl implements InterviewExperienceServic
 
     private final InterviewExperienceRepository repository;
     private final FileService fileService;
-
+    private final InterviewCacheService cacheService;
+    private final ObjectMapper objectMapper;
     private final ModelMapper modelMapper;
 
     @Override
@@ -47,8 +54,27 @@ public class InterviewExperienceServiceImpl implements InterviewExperienceServic
         log.info("InterviewExperienceServiceImpl :: createInterviewExperience :: saving :: interview experience");
         InterviewExperience newExperience = repository.save(experience);
 
-        log.info("InterviewExperienceServiceImpl :: createInterviewExperience :: mapping :: entity to response");
-        return modelMapper.map(newExperience, InterviewExperienceResponse.class);
+        InterviewExperienceResponse response =
+                modelMapper.map(newExperience, InterviewExperienceResponse.class);
+
+        // save object cache
+        try {
+            String json = objectMapper.writeValueAsString(response);
+            cacheService.save(newExperience.getId(), json);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize interview response", e);
+        }
+
+// add to latest index
+        cacheService.addToIndex(
+                newExperience.getId(),
+                newExperience.getUpdatedAt()
+                        .atZone(ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+        );
+      cacheService.trimIndex(10000); // keep only latest 100 entries in index
+        return response;
 
     }
 
@@ -68,30 +94,162 @@ public class InterviewExperienceServiceImpl implements InterviewExperienceServic
 
 
     @Override
-    public List<InterviewExperienceResponse> searchByCompany(String companyTag) {
-        log.info("InterviewExperienceServiceImpl :: searchByCompany :: searching :: experiences for company: {}", companyTag);
-        List<InterviewExperience> experiences = repository.findByCompanyTagOrderByCreatedAtDesc(companyTag);
+    public PageResponseDTO searchByCompany(String companyTag,
+                                           Integer pageNumber,
+                                           Integer pageSize,
+                                           String sortBy,
+                                           String sortDir) {
 
-        log.info("InterviewExperienceServiceImpl :: searchByCompany :: found :: {} experiences", experiences.size());
-        return experiences.stream()
-                .map(experience -> modelMapper.map(experience, InterviewExperienceResponse.class))
+        log.info("InterviewExperienceServiceImpl :: searchByCompany :: searching company {}", companyTag);
+
+        Sort sort = sortDir.equalsIgnoreCase("asc")
+                ? Sort.by(sortBy).ascending()
+                : Sort.by(sortBy).descending();
+
+        Pageable pageable = PageRequest.of(pageNumber, pageSize, sort);
+
+        Page<InterviewExperience> page =
+                repository.findByCompanyTagContainingIgnoreCase(companyTag, pageable);
+
+        List<InterviewExperienceResponse> content = page.getContent()
+                .stream()
+                .map(exp -> modelMapper.map(exp, InterviewExperienceResponse.class))
                 .collect(Collectors.toList());
+
+        return PageResponseDTO.builder()
+                .content(content)
+                .pageNumber(page.getNumber())
+                .pageSize(page.getSize())
+                .totalElements(page.getTotalElements())
+                .totalPages(page.getTotalPages())
+                .lastPage(page.isLast())
+                .build();
     }
 
 
     @Override
     public PageResponseDTO getAllInterviews(Integer pageNumber, Integer pageSize, String sortBy, String sortDir) {
-        log.info("InterviewExperienceServiceImpl :: getAllInterviews :: fetching :: page {} with size {}", pageNumber, pageSize);
-        Sort sort = (sortDir.equalsIgnoreCase("asc")) ? Sort.by(sortBy).ascending() : Sort.by(sortBy).descending();
-        Pageable p = PageRequest.of(pageNumber, pageSize, sort);
 
-        Page<InterviewExperience> experiences = repository.findAll(p);
-        List<InterviewExperience> experienceList = experiences.getContent();
-        log.info("InterviewExperienceServiceImpl :: getAllInterviews :: found :: {} experiences", experienceList.size());
+        log.info("InterviewExperienceServiceImpl :: getAllInterviews :: page={} size={}", pageNumber, pageSize);
 
-        List<InterviewExperienceResponse> res = experienceList.stream()
-                .map(experience -> modelMapper.map(experience, InterviewExperienceResponse.class))
-                .collect(Collectors.toList());
+        int start = pageNumber * pageSize;
+        int end = start + pageSize - 1;
+
+        log.info("Calculated Redis range :: start={} end={}", start, end);
+
+        Set<String> ids = cacheService.getLatestIds(start, end);
+
+        List<InterviewExperienceResponse> responses = new ArrayList<>();
+
+        if (ids != null && !ids.isEmpty()) {
+
+            log.info("Redis index returned {} interview IDs", ids.size());
+
+            for (String id : ids) {
+
+                String json = cacheService.get(UUID.fromString(id));
+
+                if (json != null) {
+
+                    try {
+
+                        InterviewExperienceResponse response =
+                                objectMapper.readValue(json, InterviewExperienceResponse.class);
+
+                        responses.add(response);
+
+                        log.info("CACHE HIT :: {}", id);
+
+                    } catch (Exception e) {
+
+                        log.error("Cache parse error {}", id, e);
+                    }
+
+                } else {
+
+                    log.warn("CACHE MISS :: {} → fetching DB", id);
+
+                    InterviewExperience exp = repository.findById(UUID.fromString(id)).orElse(null);
+
+                    if (exp != null) {
+
+                        InterviewExperienceResponse response =
+                                modelMapper.map(exp, InterviewExperienceResponse.class);
+
+                        responses.add(response);
+
+                        try {
+
+                            String newJson = objectMapper.writeValueAsString(response);
+
+                            cacheService.save(exp.getId(), newJson);
+
+                            log.info("Repopulated Redis cache {}", id);
+
+                        } catch (Exception e) {
+
+                            log.error("Cache store failed {}", id, e);
+                        }
+                    }
+                }
+            }
+
+            log.info("Returning {} interviews from Redis", responses.size());
+
+            return PageResponseDTO.builder()
+                    .content(responses)
+                    .pageNumber(pageNumber)
+                    .pageSize(pageSize)
+                    .totalElements(responses.size())
+                    .totalPages(1)
+                    .lastPage(true)
+                    .build();
+        }
+
+        // Redis empty → DB fallback
+
+        log.warn("Redis index empty :: DB fallback");
+
+        Sort sort = sortDir.equalsIgnoreCase("asc")
+                ? Sort.by(sortBy).ascending()
+                : Sort.by(sortBy).descending();
+
+        Pageable pageable = PageRequest.of(pageNumber, pageSize, sort);
+
+        Page<InterviewExperience> experiences = repository.findAll(pageable);
+
+        List<InterviewExperienceResponse> res = new ArrayList<>();
+
+        for (InterviewExperience exp : experiences.getContent()) {
+
+            InterviewExperienceResponse response =
+                    modelMapper.map(exp, InterviewExperienceResponse.class);
+
+            res.add(response);
+
+            try {
+
+                String json = objectMapper.writeValueAsString(response);
+
+                //cacheService.save(exp.getId(), json);
+
+                cacheService.addToIndex(
+                        exp.getId(),
+                        exp.getUpdatedAt()
+                                .atZone(ZoneId.systemDefault())
+                                .toInstant()
+                                .toEpochMilli()
+                );
+
+                log.info("Cached interview {} into Redis", exp.getId());
+
+            } catch (Exception e) {
+
+                log.error("Failed to cache {}", exp.getId(), e);
+            }
+        }
+
+        log.info("Database returned {} interviews", res.size());
 
         return PageResponseDTO.builder()
                 .content(res)
@@ -105,15 +263,44 @@ public class InterviewExperienceServiceImpl implements InterviewExperienceServic
 
     @Override
     public InterviewExperienceResponse getInterviewById(UUID id) {
-        log.info("InterviewExperienceServiceImpl :: getInterviewById :: fetching :: experience with id: {}", id);
+
+        log.info("InterviewExperienceServiceImpl :: getInterviewById :: checking cache :: id: {}", id);
+
+        Object cachedObject = cacheService.get(id);
+
+        if (cachedObject != null) {
+
+            InterviewExperienceResponse cached =
+                    objectMapper.convertValue(
+                            cachedObject,
+                            InterviewExperienceResponse.class
+                    );
+
+            log.info("CACHE HIT {}", id);
+            return cached;
+        }
+
+        log.info("InterviewExperienceServiceImpl :: getInterviewById :: CACHE MISS :: fetching from DB :: id: {}", id);
+
         InterviewExperience experience = repository.findById(id)
                 .orElseThrow(() -> {
-                    log.error("InterviewExperienceServiceImpl :: getInterviewById :: not found :: experience with id: {}", id);
+                    log.error("InterviewExperienceServiceImpl :: getInterviewById :: not found :: id: {}", id);
                     return new RuntimeException("Interview Experience not found");
                 });
 
-        log.info("InterviewExperienceServiceImpl :: getInterviewById :: mapping :: experience to response");
-        return modelMapper.map(experience, InterviewExperienceResponse.class);
+        InterviewExperienceResponse response =
+                modelMapper.map(experience, InterviewExperienceResponse.class);
+
+        log.info("InterviewExperienceServiceImpl :: getInterviewById :: saving to cache :: id: {}", id);
+
+        try {
+            String json = objectMapper.writeValueAsString(response);
+            cacheService.save(id, json);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize interview response", e);
+        }
+
+        return response;
     }
 
 
@@ -143,9 +330,13 @@ public class InterviewExperienceServiceImpl implements InterviewExperienceServic
 
         // Delete DB record
         repository.delete(experience);
-        log.info("InterviewExperienceServiceImpl :: deleteInterviewExperience :: deleted DB record with id: {}", id);
-    }
 
+        cacheService.delete(id);
+        cacheService.removeFromIndex(id);
+
+        log.info("InterviewExperienceServiceImpl :: deleteInterviewExperience :: deleted DB record with id: {}", id);
+
+    }
     @Override
     public InterviewExperienceResponse updateInterviewExperience(UUID id, InterviewExperienceRequest request, MultipartFile newImage) throws IOException {
         log.info("InterviewExperienceServiceImpl :: updateInterviewExperience :: updating :: experience with id: {}", id);
@@ -181,10 +372,26 @@ public class InterviewExperienceServiceImpl implements InterviewExperienceServic
 
         // Save updated entity
         InterviewExperience updatedExperience = repository.save(experience);
+        InterviewExperienceResponse response =
+                modelMapper.map(updatedExperience, InterviewExperienceResponse.class);
 
-        log.info("InterviewExperienceServiceImpl :: updateInterviewExperience :: saved :: updated experience");
+// refresh cache
+        try {
+            String json = objectMapper.writeValueAsString(response);
+            cacheService.save(updatedExperience.getId(), json);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize interview response", e);
+        }
 
-        return modelMapper.map(updatedExperience, InterviewExperienceResponse.class);
+        cacheService.addToIndex(
+                updatedExperience.getId(),
+                updatedExperience.getUpdatedAt()
+                        .atZone(ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+        );
+
+        return response;
     }
 
 }

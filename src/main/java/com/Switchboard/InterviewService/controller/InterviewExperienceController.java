@@ -94,15 +94,38 @@ public class InterviewExperienceController {
     }
 
 
-    @Operation(summary = "Search interviews by company", description = "Retrieves all interview experiences for a specific company")
+    @Operation(summary = "Search interviews by company",
+            description = "Retrieves interview experiences for a specific company with pagination and sorting")
     @GetMapping("/company")
-    public ResponseEntity<List<InterviewExperienceResponse>> searchByCompany(
+    public ResponseEntity<PageResponseDTO> searchByCompany(
+
             @Parameter(description = "Company name to search for", required = true)
-            @RequestParam String company) {
-        log.info("InterviewExperienceController :: searchByCompany :: searching :: interviews for company: {}", company);
-        List<InterviewExperienceResponse> response = interviewService.searchByCompany(company);
-        log.info("InterviewExperienceController :: searchByCompany :: found :: {} interviews", response.size());
-        return ResponseEntity.ok(interviewService.searchByCompany(company));
+            @RequestParam String company,
+
+            @Parameter(description = "Page number (0-indexed)")
+            @RequestParam(value = "pageNumber", defaultValue = AppConstants.PAGE_NUMBER, required = false)
+            Integer pageNumber,
+
+            @Parameter(description = "Number of items per page")
+            @RequestParam(value = "pageSize", defaultValue = AppConstants.PAGE_SIZE, required = false)
+            Integer pageSize,
+
+            @Parameter(description = "Field to sort by")
+            @RequestParam(value = "sortBy", defaultValue = AppConstants.SORT_BY, required = false)
+            String sortBy,
+
+            @Parameter(description = "Sort direction (asc/desc)")
+            @RequestParam(value = "sortDir", defaultValue = AppConstants.SORT_DIR, required = false)
+            String sortDir
+    ) {
+
+        log.info("InterviewExperienceController :: searchByCompany :: searching interviews for company: {}", company);
+
+        PageResponseDTO response = interviewService.searchByCompany(company, pageNumber, pageSize, sortBy, sortDir);
+
+        log.info("InterviewExperienceController :: searchByCompany :: found {} interviews", response.getContent().size());
+
+        return ResponseEntity.ok(response);
     }
 
     @Operation(summary = "Get all interviews", description = "Retrieves all interview experiences with pagination and sorting")

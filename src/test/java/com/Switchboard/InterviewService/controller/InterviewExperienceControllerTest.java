@@ -190,23 +190,33 @@ class InterviewExperienceControllerTest {
         assertEquals(expectedList, result.getBody());
         verify(interviewService, times(1)).searchByEmail(email);
     }
-
     @Test
-    void searchByCompany_ShouldReturnListOfExperiences() {
-        // Arrange
+    void searchByCompany_ShouldReturnPagedExperiences() {
+
         String company = "Google";
-        List<InterviewExperienceResponse> expectedList = Arrays.asList(response);
-        when(interviewService.searchByCompany(company)).thenReturn(expectedList);
 
-        // Act
-        ResponseEntity<List<InterviewExperienceResponse>> result = controller.searchByCompany(company);
+        PageResponseDTO pageResponse = PageResponseDTO.builder()
+                .content(Arrays.asList(response))
+                .pageNumber(0)
+                .pageSize(10)
+                .totalElements(1)
+                .totalPages(1)
+                .lastPage(true)
+                .build();
 
-        // Assert
+        when(interviewService.searchByCompany(company, 0, 10, "updatedAt", "asc"))
+                .thenReturn(pageResponse);
+
+        ResponseEntity<PageResponseDTO> result =
+                controller.searchByCompany(company, 0, 10, "updatedAt", "asc");
+
         assertNotNull(result);
         assertEquals(HttpStatus.OK, result.getStatusCode());
-        assertEquals(expectedList, result.getBody());
-        assertEquals(1, result.getBody().size());
-        verify(interviewService, times(2)).searchByCompany(company);  // Called twice in controller
+        assertEquals(pageResponse, result.getBody());
+        assertEquals(1, result.getBody().getContent().size());
+
+        verify(interviewService, times(1))
+                .searchByCompany(company, 0, 10, "updatedAt", "asc");
     }
 
     @Test

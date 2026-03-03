@@ -1,6 +1,8 @@
 package com.Switchboard.InterviewService.repository;
 
 import com.Switchboard.InterviewService.model.InterviewExperience;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
@@ -10,5 +12,8 @@ public interface InterviewExperienceRepository extends JpaRepository<InterviewEx
 
     List<InterviewExperience> findByUserEmailOrderByCreatedAtDesc(String userEmail);
 
-    List<InterviewExperience> findByCompanyTagOrderByCreatedAtDesc(String companyTag);
+    Page<InterviewExperience> findByCompanyTagContainingIgnoreCase(
+            String companyTag,
+            Pageable pageable
+    );
 }

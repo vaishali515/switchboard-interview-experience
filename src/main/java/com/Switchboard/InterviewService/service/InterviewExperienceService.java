@@ -19,7 +19,11 @@ public interface InterviewExperienceService {
 
    List<InterviewExperienceResponse> searchByEmail(String userEmail);
 
-   List<InterviewExperienceResponse> searchByCompany(String companyTag);
+    PageResponseDTO searchByCompany(String company,
+                                    Integer pageNumber,
+                                    Integer pageSize,
+                                    String sortBy,
+                                    String sortDir);
 
    InterviewExperienceResponse updateInterviewExperience(UUID id, InterviewExperienceRequest request, MultipartFile newImage)  throws IOException;
 
